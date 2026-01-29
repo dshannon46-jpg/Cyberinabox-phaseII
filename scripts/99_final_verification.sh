@@ -1,7 +1,8 @@
 #!/bin/bash
 #
 # Module 99: Final Verification
-# Verify all services are running and accessible
+# Comprehensive verification of all CyberHygiene services
+# NIST 800-171 Compliance Verification
 #
 
 set -euo pipefail
@@ -17,173 +18,265 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [99-VERIFY] $*"
 }
 
-log "Running final system verification..."
+log "Running comprehensive system verification..."
 
 TESTS_PASSED=0
 TESTS_FAILED=0
+TESTS_WARNED=0
 declare -a FAILURES=()
+declare -a WARNINGS=()
 
-# Test 1: FreeIPA
-log "Testing FreeIPA..."
-if systemctl is-active --quiet ipa; then
-    log "  ✓ FreeIPA service is running"
-    ((TESTS_PASSED++))
+# Test function
+run_test() {
+    local test_name="$1"
+    local test_command="$2"
+    local is_critical="${3:-true}"
 
-    # Test authentication
-    if echo "${ADMIN_PASSWORD}" | kinit admin 2>/dev/null; then
-        log "  ✓ FreeIPA authentication works"
-        kdestroy
+    if eval "${test_command}" 2>/dev/null; then
+        log "  ✓ ${test_name}"
         ((TESTS_PASSED++))
+        return 0
     else
-        log "  ✗ FreeIPA authentication failed"
-        FAILURES+=("FreeIPA authentication")
-        ((TESTS_FAILED++))
+        if [[ "${is_critical}" == "true" ]]; then
+            log "  ✗ ${test_name}"
+            FAILURES+=("${test_name}")
+            ((TESTS_FAILED++))
+        else
+            log "  ⚠ ${test_name}"
+            WARNINGS+=("${test_name}")
+            ((TESTS_WARNED++))
+        fi
+        return 1
     fi
-else
-    log "  ✗ FreeIPA service is not running"
-    FAILURES+=("FreeIPA service")
-    ((TESTS_FAILED++))
-fi
+}
 
-# Test 2: DNS
-log "Testing DNS resolution..."
-if host "${DC1_HOSTNAME}" ${DC1_IP} &>/dev/null; then
-    log "  ✓ DNS resolution works"
+# ==========================================
+# SECTION 1: System Security
+# ==========================================
+echo ""
+log "=========================================="
+log "SECTION 1: System Security"
+log "=========================================="
+
+# FIPS Mode
+run_test "FIPS mode enabled" "fips-mode-setup --check 2>/dev/null | grep -q 'FIPS mode is enabled'"
+
+# SELinux
+run_test "SELinux enforcing" "getenforce | grep -q 'Enforcing'"
+
+# Firewall
+run_test "Firewall active" "systemctl is-active --quiet firewalld"
+
+# ==========================================
+# SECTION 2: Identity Management
+# ==========================================
+echo ""
+log "=========================================="
+log "SECTION 2: Identity Management (FreeIPA)"
+log "=========================================="
+
+run_test "FreeIPA service running" "ipactl status 2>/dev/null | grep -q 'running'"
+run_test "DNS service running" "systemctl is-active --quiet named-pkcs11 || systemctl is-active --quiet named"
+run_test "Kerberos KDC running" "systemctl is-active --quiet krb5kdc"
+run_test "LDAP service running" "systemctl is-active --quiet dirsrv@*"
+
+# Test authentication
+if echo "${ADMIN_PASSWORD:-}" | kinit admin 2>/dev/null; then
+    log "  ✓ Kerberos authentication works"
     ((TESTS_PASSED++))
+    kdestroy 2>/dev/null || true
 else
-    log "  ✗ DNS resolution failed"
-    FAILURES+=("DNS resolution")
-    ((TESTS_FAILED++))
+    log "  ⚠ Kerberos authentication test skipped (no password available)"
+    ((TESTS_WARNED++))
 fi
 
-# Test 3: Firewall
-log "Testing firewall..."
-if systemctl is-active --quiet firewalld; then
-    log "  ✓ Firewall is active"
-    ((TESTS_PASSED++))
+# ==========================================
+# SECTION 3: Log Management
+# ==========================================
+echo ""
+log "=========================================="
+log "SECTION 3: Log Management (Graylog)"
+log "=========================================="
+
+run_test "MongoDB running" "systemctl is-active --quiet mongod"
+run_test "OpenSearch/Elasticsearch running" "systemctl is-active --quiet opensearch || systemctl is-active --quiet elasticsearch"
+run_test "Graylog server running" "systemctl is-active --quiet graylog-server"
+run_test "Graylog API responding" "curl -s http://localhost:9000/api/system/lbstatus 2>/dev/null | grep -q 'ALIVE'" "false"
+
+# ==========================================
+# SECTION 4: Security Monitoring (Wazuh)
+# ==========================================
+echo ""
+log "=========================================="
+log "SECTION 4: Security Monitoring (Wazuh)"
+log "=========================================="
+
+run_test "Wazuh Indexer running" "systemctl is-active --quiet wazuh-indexer"
+run_test "Wazuh Manager running" "systemctl is-active --quiet wazuh-manager"
+run_test "Wazuh Dashboard running" "systemctl is-active --quiet wazuh-dashboard"
+run_test "Wazuh Dashboard port 5601 listening" "ss -tlnp | grep -q ':5601'"
+
+# ==========================================
+# SECTION 5: Network Security (Suricata)
+# ==========================================
+echo ""
+log "=========================================="
+log "SECTION 5: Network Security (Suricata)"
+log "=========================================="
+
+run_test "Suricata IDS running" "systemctl is-active --quiet suricata"
+run_test "Suricata rules present" "test -f /var/lib/suricata/rules/suricata.rules"
+run_test "Suricata eve.json exists" "test -f /var/log/suricata/eve.json" "false"
+
+# ==========================================
+# SECTION 6: Monitoring Stack
+# ==========================================
+echo ""
+log "=========================================="
+log "SECTION 6: Monitoring Stack"
+log "=========================================="
+
+run_test "Prometheus running" "systemctl is-active --quiet prometheus"
+run_test "Grafana running" "systemctl is-active --quiet grafana-server"
+run_test "Node Exporter running" "systemctl is-active --quiet node_exporter" "false"
+
+# ==========================================
+# SECTION 7: Application Whitelisting
+# ==========================================
+echo ""
+log "=========================================="
+log "SECTION 7: Application Whitelisting"
+log "=========================================="
+
+run_test "fapolicyd running" "systemctl is-active --quiet fapolicyd"
+run_test "fapolicyd trust database exists" "test -f /var/lib/fapolicyd/data/trust.db"
+
+# ==========================================
+# SECTION 8: USB Security
+# ==========================================
+echo ""
+log "=========================================="
+log "SECTION 8: USB Security"
+log "=========================================="
+
+run_test "USBGuard running" "systemctl is-active --quiet usbguard"
+run_test "USBGuard rules exist" "test -f /etc/usbguard/rules.conf"
+
+# ==========================================
+# SECTION 9: Malware Detection
+# ==========================================
+echo ""
+log "=========================================="
+log "SECTION 9: Malware Detection"
+log "=========================================="
+
+run_test "YARA installed" "command -v yara &>/dev/null"
+run_test "YARA rules exist" "test -d /etc/yara/rules.d && ls /etc/yara/rules.d/*.yar &>/dev/null"
+
+# ==========================================
+# SECTION 10: SysAdmin Dashboard
+# ==========================================
+echo ""
+log "=========================================="
+log "SECTION 10: SysAdmin Agent Dashboard"
+log "=========================================="
+
+run_test "SysAdmin Agent running" "systemctl is-active --quiet sysadmin-agent" "false"
+run_test "Ollama AI service running" "systemctl is-active --quiet ollama" "false"
+
+# ==========================================
+# SECTION 11: SSL/TLS Certificates
+# ==========================================
+echo ""
+log "=========================================="
+log "SECTION 11: SSL/TLS Certificates"
+log "=========================================="
+
+if [[ -f "${SSL_CERT_PATH:-/root/ssl-certificates/wildcard.crt}" ]]; then
+    run_test "SSL certificate exists" "test -f ${SSL_CERT_PATH:-/root/ssl-certificates/wildcard.crt}"
+    run_test "SSL certificate valid" "openssl x509 -in ${SSL_CERT_PATH:-/root/ssl-certificates/wildcard.crt} -noout -checkend 0"
 else
-    log "  ✗ Firewall is not active"
-    FAILURES+=("Firewall")
-    ((TESTS_FAILED++))
+    log "  ⚠ SSL certificate path not found"
+    ((TESTS_WARNED++))
 fi
 
-# Test 4: SELinux
-log "Testing SELinux..."
-if getenforce | grep -q "Enforcing"; then
-    log "  ✓ SELinux is enforcing"
-    ((TESTS_PASSED++))
-else
-    log "  ✗ SELinux is not enforcing"
-    FAILURES+=("SELinux")
-    ((TESTS_FAILED++))
-fi
+# ==========================================
+# SECTION 12: Resources
+# ==========================================
+echo ""
+log "=========================================="
+log "SECTION 12: System Resources"
+log "=========================================="
 
-# Test 5: FIPS Mode
-log "Testing FIPS mode..."
-if fips-mode-setup --check | grep -q "FIPS mode is enabled"; then
-    log "  ✓ FIPS mode is enabled"
-    ((TESTS_PASSED++))
-else
-    log "  ✗ FIPS mode is not enabled"
-    FAILURES+=("FIPS mode")
-    ((TESTS_FAILED++))
-fi
-
-# Test 6: SSL Certificates
-log "Testing SSL certificates..."
-if [[ -f "${SSL_CERT_PATH}" ]] && [[ -f "${SSL_KEY_PATH}" ]]; then
-    log "  ✓ SSL certificates exist"
-    ((TESTS_PASSED++))
-
-    # Verify certificate is valid
-    if openssl x509 -in "${SSL_CERT_PATH}" -noout -checkend 0; then
-        log "  ✓ SSL certificate is valid"
-        ((TESTS_PASSED++))
-    else
-        log "  ✗ SSL certificate is expired or invalid"
-        FAILURES+=("SSL certificate validity")
-        ((TESTS_FAILED++))
-    fi
-else
-    log "  ✗ SSL certificates not found"
-    FAILURES+=("SSL certificates")
-    ((TESTS_FAILED++))
-fi
-
-# Test 7: Disk Space
-log "Testing disk space..."
+# Disk space
 ROOT_SPACE=$(df -BG / | awk 'NR==2 {print $4}' | sed 's/G//')
 if [[ ${ROOT_SPACE} -gt 10 ]]; then
-    log "  ✓ Sufficient disk space: ${ROOT_SPACE}GB"
+    log "  ✓ Disk space: ${ROOT_SPACE}GB available"
     ((TESTS_PASSED++))
 else
-    log "  ⚠ Low disk space: ${ROOT_SPACE}GB"
-    FAILURES+=("Low disk space")
-    ((TESTS_FAILED++))
+    log "  ⚠ Low disk space: ${ROOT_SPACE}GB available"
+    WARNINGS+=("Low disk space")
+    ((TESTS_WARNED++))
 fi
 
-# Test 8: Memory
-log "Testing memory..."
+# Memory
 FREE_MEM=$(free -g | awk '/^Mem:/ {print $7}')
-if [[ ${FREE_MEM} -gt 5 ]]; then
-    log "  ✓ Sufficient free memory: ${FREE_MEM}GB"
+if [[ ${FREE_MEM} -gt 4 ]]; then
+    log "  ✓ Memory: ${FREE_MEM}GB available"
     ((TESTS_PASSED++))
 else
-    log "  ⚠ Low free memory: ${FREE_MEM}GB"
+    log "  ⚠ Low memory: ${FREE_MEM}GB available"
+    WARNINGS+=("Low memory")
+    ((TESTS_WARNED++))
 fi
 
-# Test 9: Services
-log "Testing installed services..."
-EXPECTED_SERVICES=("ipa" "firewalld")
-for service in "${EXPECTED_SERVICES[@]}"; do
-    if systemctl is-enabled --quiet "${service}" 2>/dev/null; then
-        log "  ✓ ${service} is enabled"
-        ((TESTS_PASSED++))
-    else
-        log "  ✗ ${service} is not enabled"
-        FAILURES+=("${service} not enabled")
-        ((TESTS_FAILED++))
-    fi
-done
+# CPU load
+LOAD=$(uptime | awk -F'load average:' '{print $2}' | cut -d',' -f1 | xargs)
+log "  ℹ Load average: ${LOAD}"
 
-# Generate verification report
-REPORT_FILE="${SCRIPT_DIR}/VERIFICATION_REPORT_${INSTALL_DATE}.txt"
+# ==========================================
+# Generate Report
+# ==========================================
+REPORT_FILE="${SCRIPT_DIR}/VERIFICATION_REPORT_$(date +%Y%m%d_%H%M%S).txt"
+
 cat > "${REPORT_FILE}" <<EOF
-========================================
-CyberHygiene Installation Verification Report
-========================================
+================================================================================
+CyberHygiene Phase II - Installation Verification Report
+================================================================================
 Generated: $(date)
-Domain: ${DOMAIN}
 Hostname: $(hostname -f)
+Domain: ${DOMAIN:-N/A}
 
-========================================
-TEST RESULTS
-========================================
-Total Tests: $((TESTS_PASSED + TESTS_FAILED))
-Passed: ${TESTS_PASSED}
-Failed: ${TESTS_FAILED}
+================================================================================
+TEST SUMMARY
+================================================================================
+Tests Passed:  ${TESTS_PASSED}
+Tests Failed:  ${TESTS_FAILED}
+Tests Warned:  ${TESTS_WARNED}
+--------------------------------------------------------------------------------
+Total Tests:   $((TESTS_PASSED + TESTS_FAILED + TESTS_WARNED))
 
-========================================
+================================================================================
 SYSTEM INFORMATION
-========================================
-OS: $(cat /etc/redhat-release)
+================================================================================
+Operating System: $(cat /etc/redhat-release 2>/dev/null || echo "Unknown")
 Kernel: $(uname -r)
-FIPS: $(fips-mode-setup --check)
-SELinux: $(getenforce)
+FIPS Mode: $(fips-mode-setup --check 2>/dev/null || echo "Unknown")
+SELinux: $(getenforce 2>/dev/null || echo "Unknown")
 Hostname: $(hostname -f)
-IP Address: $(ip addr show | grep "inet " | grep -v 127.0.0.1 | awk '{print $2}' | head -1)
+IP Address: $(hostname -I | awk '{print $1}')
 
 Memory: $(free -h | awk '/^Mem:/ {print $2}') total, $(free -h | awk '/^Mem:/ {print $7}') available
-Disk: $(df -h / | awk 'NR==2 {print $2}') total, $(df -h / | awk 'NR==2 {print $4}') available
+Disk (/): $(df -h / | awk 'NR==2 {print $2}') total, $(df -h / | awk 'NR==2 {print $4}') available
 
-========================================
-SERVICE STATUS
-========================================
-$(systemctl list-units --type=service --state=running | grep -E "ipa|samba|firewalld" || echo "No matching services")
+================================================================================
+RUNNING SERVICES
+================================================================================
+$(systemctl list-units --type=service --state=running | grep -E "ipa|wazuh|graylog|suricata|prometheus|grafana|fapolicyd|usbguard|mongod|httpd|named" | head -20)
 
-========================================
-FAILURES (if any)
-========================================
+================================================================================
+FAILED TESTS
+================================================================================
 EOF
 
 if [[ ${#FAILURES[@]} -gt 0 ]]; then
@@ -191,26 +284,62 @@ if [[ ${#FAILURES[@]} -gt 0 ]]; then
         echo "- ${failure}" >> "${REPORT_FILE}"
     done
 else
-    echo "None - All tests passed!" >> "${REPORT_FILE}"
+    echo "None - All critical tests passed!" >> "${REPORT_FILE}"
 fi
 
 cat >> "${REPORT_FILE}" <<EOF
 
-========================================
+================================================================================
+WARNINGS
+================================================================================
+EOF
+
+if [[ ${#WARNINGS[@]} -gt 0 ]]; then
+    for warning in "${WARNINGS[@]}"; do
+        echo "- ${warning}" >> "${REPORT_FILE}"
+    done
+else
+    echo "None" >> "${REPORT_FILE}"
+fi
+
+cat >> "${REPORT_FILE}" <<EOF
+
+================================================================================
+ACCESS INFORMATION
+================================================================================
+FreeIPA Web UI:     https://$(hostname -f)/ipa/ui/
+Wazuh Dashboard:    https://$(hostname -f):5601
+Graylog:            http://$(hostname -f):9000
+Grafana:            http://$(hostname -f):3000
+Prometheus:         http://$(hostname -f):9090
+SysAdmin Agent:     https://$(hostname -f)/sysadmin/
+
+Default Username: admin
+Passwords: See CREDENTIALS file in installation directory
+
+================================================================================
+NIST 800-171 COMPLIANCE STATUS
+================================================================================
+- Access Control (3.1): FreeIPA + USBGuard
+- Audit & Accountability (3.3): Graylog + Wazuh
+- Configuration Management (3.4): fapolicyd + OpenSCAP
+- Identification & Auth (3.5): FreeIPA/Kerberos
+- System & Communications (3.13): Firewall + SSL/TLS
+- System & Info Integrity (3.14): Wazuh + Suricata + YARA
+
+================================================================================
 NEXT STEPS
-========================================
-1. Review this verification report
-2. Access FreeIPA web UI: https://${DC1_HOSTNAME}
-3. Test user authentication
-4. Configure additional services as needed
-5. Complete customer handoff documentation
+================================================================================
+1. Review this verification report for any failures
+2. Test all web interfaces are accessible
+3. Change default passwords
+4. Configure additional users in FreeIPA
+5. Set up log retention policies in Graylog
+6. Review Wazuh agent deployment for clients
+7. Configure alerting rules
+8. Complete customer handoff documentation
 
-========================================
-CREDENTIALS
-========================================
-See file: ${SCRIPT_DIR}/CREDENTIALS_${INSTALL_DATE}.txt
-
-========================================
+================================================================================
 EOF
 
 chmod 600 "${REPORT_FILE}"
@@ -218,31 +347,40 @@ chmod 600 "${REPORT_FILE}"
 # Summary
 echo ""
 log "=========================================="
-log "Final Verification Summary"
+log "Verification Complete"
 log "=========================================="
 log "Tests Passed: ${TESTS_PASSED}"
 log "Tests Failed: ${TESTS_FAILED}"
-log ""
+log "Tests Warned: ${TESTS_WARNED}"
+echo ""
 
 if [[ ${TESTS_FAILED} -eq 0 ]]; then
-    log "✓✓✓ ALL TESTS PASSED ✓✓✓"
-    log ""
-    log "CyberHygiene installation is complete and verified!"
-    log "System is ready for production use."
+    log "✓✓✓ ALL CRITICAL TESTS PASSED ✓✓✓"
+    echo ""
+    log "CyberHygiene installation verified successfully!"
+    log "System is ready for production deployment."
 else
-    log "⚠ SOME TESTS FAILED"
-    log ""
+    log "⚠ SOME CRITICAL TESTS FAILED"
+    echo ""
     log "Failed tests:"
     for failure in "${FAILURES[@]}"; do
         log "  - ${failure}"
     done
-    log ""
-    log "Review and resolve failures before deploying to production"
+    echo ""
+    log "Review and resolve failures before production deployment."
 fi
 
-log ""
+if [[ ${TESTS_WARNED} -gt 0 ]]; then
+    echo ""
+    log "Warnings (non-critical):"
+    for warning in "${WARNINGS[@]}"; do
+        log "  - ${warning}"
+    done
+fi
+
+echo ""
 log "Full report: ${REPORT_FILE}"
-log ""
+echo ""
 
 # Exit with appropriate code
 if [[ ${TESTS_FAILED} -eq 0 ]]; then

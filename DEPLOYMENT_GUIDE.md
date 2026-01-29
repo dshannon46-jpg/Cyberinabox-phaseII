@@ -48,7 +48,7 @@ Before committing to GitHub, verify:
 
 ```bash
 # Navigate to installer directory
-cd "/home/dshannon/Documents/Cybersecurity Project Phase II/Installer"
+cd "/path/to/Cyberinabox-phaseII"  # Adjust to your local clone location
 
 # Initialize git (if not already done)
 git init
